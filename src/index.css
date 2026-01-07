@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  /* Utilitários específicos para impressão e layout */
+  .no-print {
+    @apply print:hidden;
+  }
+}
+
+/* Estilos de impressão */
+@media print {
+  body {
+    background: white;
+  }
+  @page {
+    margin: 0;
+    size: auto;
+  }
+}

@@ -1,0 +1,5 @@
+const response = await fetch('/api/gerar', {
+    method: 'POST',
+    body: JSON.stringify({ link: link, aba: aba })
+});
+const dados = await response.json();
