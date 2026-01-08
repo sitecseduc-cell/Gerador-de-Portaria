@@ -66,40 +66,47 @@ def processar():
         sheets_service, drive_service = get_services()
         sid = extrair_id(link)
 
-        # 1. Busca Dados
-        result = sheets_service.spreadsheets().values().get(spreadsheetId=sid, range=f"'{aba}'!A:Z").execute()
+        # 1. Busca Dados (Aumentamos o range para garantir que pegue até a coluna AH)
+        result = sheets_service.spreadsheets().values().get(spreadsheetId=sid, range=f"'{aba}'!A:AZ").execute()
         linhas_todas = result.get('values', [])
         
         if len(linhas_todas) < 2:
-            return jsonify({"erro": "Planilha sem dados na Linha 2."}), 400
+            return jsonify({"erro": "Planilha sem dados."}), 400
 
-        cabecalho_original = linhas_todas[1]
-        idx_esc = ord(letra_escola.upper()) - ord('A')
+        # Definição exata das colunas solicitadas (Nomes para o cabeçalho do documento)
+        colunas_solicitadas = [
+            "NOME DA ESCOLA", "MUNICÍPIO", "DRE", "MATRÍCULA", "VÍNCULO", "MAT + VINC",
+            "NOME DO SERVIDOR", "CATEGORIA", "CARGO", "EXERCÍCIO", "PERÍODO AQUISITIVO (INÍCIO)",
+            "PERÍODO AQUISITIVO (FIM)", "PERÍODO AQUISITIVO", "EXERCÍCIO", "PERÍODO AQUISITIVO (INÍCIO)",
+            "PERÍODO AQUISITIVO (FIM)", "PERÍODO AQUISITIVO", "1º PERÍODO DE FÉRIAS ou ÚNICO (INICIO)",
+            "1º PERÍODO DE FÉRIAS ou ÚNICO (FIM)", "DIAS FÉRIAS", "1º PERÍODO DE FÉRIAS",
+            "2º PERÍODO DE FÉRIAS (INICIO)", "2º PERÍODO DE FÉRIAS (FIM)", "DIAS FÉRIAS",
+            "2º PERÍODO DE FÉRIAS", "DIAS FÉRIAS (TOTAL)", "OBSERVAÇÃO VALIDAÇÃO (ETAPA 1)"
+        ]
 
-        # 2. Define Colunas (Lógica original)
-        colunas_que_ficam = []
-        for i in range(len(cabecalho_original)):
-            if i not in indices_excluir and cabecalho_original[i].strip():
-                colunas_que_ficam.append((i, cabecalho_original[i].strip()))
-
-        # 3. Agrupamento
+        # 3. Agrupamento com Filtro na Coluna AH (Índice 33)
         grupos = defaultdict(list)
-        for linha in linhas_todas[2:]:
-            if not linha: continue
+        indice_ah = 33 # Coluna AH é a 34ª coluna (índice 33)
+        
+        for linha in linhas_todas[2:]: # Inicia nos dados (Linha 3+)
+            if len(linha) <= indice_ah: continue
             
-            # Filtro "Não Conter"
-            texto_unido = " ".join(map(str, linha)).lower()
-            if filtro_exclusao and filtro_exclusao.lower() in texto_unido:
+            status_valida = str(linha[indice_ah]).strip().upper()
+            
+            # FILTRO RESTRITO: Só aceita se for exatamente "VALIDADO"
+            if status_valida != "VALIDADO":
                 continue
 
-            escola = str(linha[idx_esc]).strip() if idx_esc < len(linha) else "GERAL"
+            # Escola para agrupamento (Supondo que Escola seja a Coluna A - Índice 0)
+            escola = str(linha[0]).strip() if len(linha) > 0 else "GERAL"
 
-            dados_celulas = []
-            for idx_col, _ in colunas_que_ficam:
-                valor = str(linha[idx_col] if idx_col < len(linha) else "").strip()
-                dados_celulas.append(valor)
-            
-            grupos[escola].append(dados_celulas)
+            # Extração apenas das colunas necessárias (Baseado na ordem da sua solicitação)
+            dados_filtrados = []
+            for i in range(len(colunas_solicitadas)):
+                valor = str(linha[i] if i < len(linha) else "").strip()
+                dados_filtrados.append(valor)
+                
+            grupos[escola].append(dados_filtrados)
 
         # 4. Geração DOCX
         doc = Document()
@@ -111,11 +118,12 @@ def processar():
         for escola, lista_dados in grupos.items():
             doc.add_paragraph("").add_run(f"ANEXO - {escola}").bold = True
             
-            tabela = doc.add_table(rows=1, cols=len(colunas_que_ficam))
+            # Cria tabela com as colunas fixas
+            tabela = doc.add_table(rows=1, cols=len(colunas_solicitadas))
             tabela.style = 'Table Grid'
             
             # Cabeçalho
-            for j, (_, nome_col) in enumerate(colunas_que_ficam):
+            for j, nome_col in enumerate(colunas_solicitadas):
                 celula = tabela.cell(0, j)
                 celula.text = nome_col
                 for p in celula.paragraphs:
@@ -134,9 +142,9 @@ def processar():
         stream = io.BytesIO()
         doc.save(stream)
         stream.seek(0)
-
-        # 6. Upload para Drive (Necessário para converter ou gerar link)
-        nome_arquivo = f"PORTARIA_GERADA_{escola[:10]}"
+        
+        # 6. Upload para Drive
+        nome_arquivo = f"PORTARIA_{escola[:10]}"
         media = MediaIoBaseUpload(stream, mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
         file_metadata = {'name': nome_arquivo, 'mimeType': 'application/vnd.google-apps.document'}
         

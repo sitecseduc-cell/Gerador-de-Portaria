@@ -9,7 +9,11 @@ import {
     AlertCircle,
     CheckCircle2,
     Settings,
-    Upload
+    Upload,
+    ZoomIn,
+    ZoomOut,
+    X,
+    FileDown
 } from 'lucide-react';
 import Papa from 'papaparse';
 
@@ -17,11 +21,14 @@ const App = () => {
     const [sheetUrl, setSheetUrl] = useState('');
     const [data, setData] = useState([]);
     const [loading, setLoading] = useState(false);
+    const [downloading, setDownloading] = useState(false); // [NEW] Downloading state
     const [error, setError] = useState(null);
     const [selectedRow, setSelectedRow] = useState(null);
     const [groupByCol, setGroupByCol] = useState('');
     const [selectedColumns, setSelectedColumns] = useState([]);
-    const [onlyValidated, setOnlyValidated] = useState(false); // [NEW] Filter state
+    const [onlyValidated, setOnlyValidated] = useState(false);
+    const [colSearch, setColSearch] = useState('');
+    const [zoom, setZoom] = useState(1);
     const [config, setConfig] = useState({
         orgao: 'PREFEITURA MUNICIPAL DE EXEMPLO',
         setor: 'Gabinete do Prefeito',
@@ -36,6 +43,41 @@ const App = () => {
             setSelectedColumns(Object.keys(data[0]));
         }
     }, [data]);
+
+    const handleDownloadDocx = async () => {
+        if (!sheetUrl) return;
+        setDownloading(true);
+        try {
+            const response = await fetch('/api/processar', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    link: sheetUrl,
+                    aba: 'Página1', // Default assume 'Página1', could be configurable
+                    letra_escola: 'A', // Default based on backend logic
+                })
+            });
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.erro || 'Erro ao gerar documento');
+            }
+
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `Portaria_${new Date().toISOString().slice(0, 10)}.docx`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+        } catch (err) {
+            alert(`Erro ao baixar: ${err.message}`);
+        } finally {
+            setDownloading(false);
+        }
+    };
 
     const getCsvUrl = (url) => {
         try {
@@ -182,52 +224,59 @@ const App = () => {
 
 
     const filteredData = useMemo(() => {
-        if (!onlyValidated) return data;
+        if (data.length === 0) return [];
 
-        // Tenta encontrar a coluna específica de validação
-        // Prioriza colunas que contenham "VALIDAÇÃO"
-        const validationCol = Object.keys(data[0] || {}).find(k =>
-            k.toUpperCase().includes('VALIDAÇÃO') ||
-            k.toUpperCase().includes('STATUS') ||
-            k.toUpperCase() === 'SITUAÇÃO'
-        );
+        // Otimização: Identifica a chave da coluna 33 (AH) uma única vez
+        const sampleRow = data[0];
+        const colunas = Object.keys(sampleRow);
 
-        if (validationCol) {
-            console.log(`[FILTER] Filtrando pela coluna: "${validationCol}"`);
-            return data.filter(row => {
-                const val = String(row[validationCol] || '').trim().toUpperCase();
+        // Verifica se existe coluna no índice 33
+        if (colunas.length <= 33) return data;
 
-                // CRITICAL: Exclude "NÃO VALIDADO", "NAO VALIDADO", or empty
-                if (!val) return false;
-                if (val.includes('NÃO') || val.includes('NAO')) return false;
+        const chaveAH = colunas[33];
 
-                // Accept "VALIDADO" strict or slightly loose but positive
-                return val.includes('VALIDADO') || val === 'SIM' || val === 'OK';
-            });
-        }
-
-        console.warn("[FILTER] Nenhuma coluna de validação específica encontrada. Usando busca global.");
-        // Fallback global (ainda excluindo o NÃO)
         return data.filter(row => {
-            return Object.values(row).some(cell => {
-                const val = String(cell).trim().toUpperCase();
-                return (val.includes('VALIDADO') && !val.includes('NÃO') && !val.includes('NAO'));
-            });
+            // Acesso direto pela chave pré-identificada, muito mais rápido que Object.keys(row) em cada iteração
+            const val = row[chaveAH];
+            // Verificação rápida de string
+            return val && val.trim().toUpperCase() === 'VALIDADO';
         });
-    }, [data, onlyValidated]);
+    }, [data]);
 
-    const getGroupedData = () => {
+    // Atualize as colunas selecionadas para bater com sua exigência
+    useEffect(() => {
+        if (data.length > 0) {
+            const colunasExigidas = [
+                "NOME DA ESCOLA", "MUNICÍPIO", "DRE", "MATRÍCULA", "VÍNCULO", "MAT + VINC",
+                "NOME DO SERVIDOR", "CATEGORIA", "CARGO", "EXERCÍCIO", "PERÍODO AQUISITIVO (INÍCIO)",
+                "PERIODO AQUISITIVO (FIM)", "PERÍODO AQUISITIVO", "EXERCÍCIO", "PERÍODO AQUISITIVO (INÍCIO)",
+                "PERIODO AQUISITIVO (FIM)", "PERÍODO AQUISITIVO", "1º PERÍODO DE FÉRIAS ou ÚNICO (INICIO)",
+                "1º PERÍODO DE FÉRIAS ou ÚNICO (FIM)", "DIAS FÉRIAS", "1º PERÍODO DE FÉRIAS",
+                "2º PERÍODO DE FÉRIAS (INICIO)", "2º PERÍODO DE FÉRIAS (FIM)", "DIAS FÉRIAS",
+                "2º PERÍODO DE FÉRIAS", "DIAS FÉRIAS (TOTAL)", "OBSERVAÇÃO VALIDAÇÃO (ETAPA 1)"
+            ];
+            // Filtra as colunas exigidas para garantir que existam no dado carregado, se não, pode dar erro visual
+            // Mas o usuário pediu para setar essas. Vou setar. Se não existirem nas keys, o renderer vai mostrar vazio.
+            setSelectedColumns(colunasExigidas);
+
+            // Tenta forçar o agrupamento pela primeira coluna (ESCOLA) se disponível
+            const colunas = Object.keys(data[0]);
+            if (colunas.length > 0) {
+                setGroupByCol(colunas[0]);
+            }
+        }
+    }, [data]);
+
+    const groupedData = useMemo(() => {
         if (!filteredData || filteredData.length === 0 || !groupByCol) return {};
         const groups = {};
-        filteredData.forEach(row => {
+        for (const row of filteredData) {
             const key = row[groupByCol] || 'OUTROS';
             if (!groups[key]) groups[key] = [];
             groups[key].push(row);
-        });
+        }
         return groups;
-    };
-
-    const groupedData = getGroupedData();
+    }, [filteredData, groupByCol]);
 
     return (
         <div className="min-h-screen bg-[#F8FAFC] flex flex-col font-['Outfit'] text-slate-800 print:bg-white print:block selection:bg-blue-100 selection:text-blue-900">
@@ -248,13 +297,13 @@ const App = () => {
                 </div>
                 <div className="flex gap-4 items-center">
                     {data.length > 0 && (
-                        <div className="flex items-center gap-3 bg-slate-100/50 px-3 py-1.5 rounded-lg border border-slate-200/60">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Agrupar por</span>
+                        <div className="flex items-center gap-3 bg-slate-100/50 px-3 py-1.5 rounded-lg border border-slate-200/60 transition-all hover:bg-slate-100">
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Agrupar</span>
                             <div className="h-4 w-[1px] bg-slate-300"></div>
                             <select
                                 value={groupByCol}
                                 onChange={(e) => setGroupByCol(e.target.value)}
-                                className="bg-transparent border-none text-slate-700 text-sm font-medium focus:ring-0 p-0 cursor-pointer outline-none min-w-[120px]"
+                                className="bg-transparent border-none text-slate-700 text-xs font-bold uppercase focus:ring-0 p-0 cursor-pointer outline-none min-w-[100px]"
                             >
                                 {Object.keys(data[0]).map(k => (
                                     <option key={k} value={k}>{k}</option>
@@ -263,13 +312,24 @@ const App = () => {
                         </div>
                     )}
 
+                    <div className="h-6 w-[1px] bg-slate-200 mx-2"></div>
+
+                    <button
+                        onClick={handleDownloadDocx}
+                        disabled={data.length === 0 || downloading}
+                        className="group flex items-center gap-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-4 py-2.5 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-lg hover:shadow-slate-200/50 active:scale-95"
+                    >
+                        {downloading ? <RefreshCw size={18} className="animate-spin text-blue-600" /> : <FileDown size={18} className="text-blue-600 group-hover:scale-110 transition-transform" />}
+                        <span className="font-semibold text-sm">Baixar DOCX</span>
+                    </button>
+
                     <button
                         onClick={handlePrint}
                         disabled={data.length === 0}
-                        className="group flex items-center gap-2.5 bg-slate-900 hover:bg-slate-800 text-white px-5 py-2.5 rounded-xl transition-all shadow-xl shadow-slate-900/10 disabled:opacity-50 disabled:shadow-none hover:translate-y-[-1px] active:translate-y-[1px]"
+                        className="group flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white px-5 py-2.5 rounded-xl transition-all shadow-xl shadow-slate-900/10 disabled:opacity-50 disabled:shadow-none hover:translate-y-[-1px] active:translate-y-[1px]"
                     >
                         <Printer size={18} className="group-hover:text-blue-200 transition-colors" />
-                        <span className="font-medium">Imprimir</span>
+                        <span className="font-medium text-sm">Imprimir</span>
                     </button>
                 </div>
             </nav>
@@ -373,47 +433,89 @@ const App = () => {
                                     <button onClick={() => setSelectedColumns([])} className="text-[10px] font-bold text-slate-400 hover:text-slate-600 hover:bg-slate-50 px-2 py-1 rounded transition-colors">NENHUMA</button>
                                 </div>
                             </div>
-                            <div className="flex flex-wrap gap-2 max-h-[300px] overflow-y-auto custom-scrollbar p-1">
-                                {Object.keys(data[0]).map(col => {
-                                    const isSelected = selectedColumns.includes(col);
-                                    return (
-                                        <button
-                                            key={col}
-                                            onClick={() => {
-                                                if (isSelected) setSelectedColumns(selectedColumns.filter(c => c !== col));
-                                                else setSelectedColumns([...selectedColumns, col]);
-                                            }}
-                                            className={`
-                                                px-3 py-1.5 rounded-lg text-xs font-medium border transition-all duration-200 flex items-center gap-2
+
+                            {/* Column Search */}
+                            <div className="mb-3 relative group">
+                                <Search className="absolute left-3 top-2.5 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={14} />
+                                <input
+                                    type="text"
+                                    placeholder="Buscar coluna..."
+                                    value={colSearch}
+                                    onChange={(e) => setColSearch(e.target.value)}
+                                    className="w-full pl-9 pr-8 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all"
+                                />
+                                {colSearch && (
+                                    <button onClick={() => setColSearch('')} className="absolute right-2 top-2 text-slate-400 hover:text-slate-600">
+                                        <X size={14} />
+                                    </button>
+                                )}
+                            </div>
+
+                            <div className="flex flex-col gap-1.5 max-h-[400px] overflow-y-auto custom-scrollbar p-2 border border-slate-200 rounded-xl bg-slate-50/50">
+                                {Object.keys(data[0])
+                                    .filter(col => col.toLowerCase().includes(colSearch.toLowerCase()))
+                                    .map(col => {
+                                        const isSelected = selectedColumns.includes(col);
+                                        return (
+                                            <button
+                                                key={col}
+                                                onClick={() => {
+                                                    if (isSelected) setSelectedColumns(selectedColumns.filter(c => c !== col));
+                                                    else setSelectedColumns([...selectedColumns, col]);
+                                                }}
+                                                className={`
+                                                w-full text-left px-3 py-2 rounded-lg text-xs font-medium border transition-all duration-200 flex items-center justify-between group
                                                 ${isSelected
-                                                    ? 'bg-blue-600 border-blue-600 text-white shadow-md shadow-blue-500/20 transform scale-105'
-                                                    : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:bg-slate-50'
-                                                }
+                                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 border-transparent text-white shadow-md shadow-blue-500/20'
+                                                        : 'bg-white border-slate-200 text-slate-600 hover:border-blue-300 hover:bg-blue-50'
+                                                    }
                                             `}
-                                        >
-                                            {isSelected && <CheckCircle2 size={10} className="stroke-[3]" />}
-                                            {col}
-                                        </button>
-                                    );
-                                })}
+                                            >
+                                                <span className="truncate pr-2">{col}</span>
+                                                <div className={`
+                                                w-4 h-4 rounded border flex items-center justify-center transition-colors shrink-0
+                                                ${isSelected ? 'bg-white/20 border-white/50' : 'border-slate-300 group-hover:border-blue-400'}
+                                            `}>
+                                                    {isSelected && <CheckCircle2 size={10} className="text-white" />}
+                                                </div>
+                                            </button>
+                                        );
+                                    })}
+                                {Object.keys(data[0]).filter(c => c.toLowerCase().includes(colSearch.toLowerCase())).length === 0 && (
+                                    <div className="text-center py-8 text-slate-400 text-xs">
+                                        Nenhuma coluna encontrada
+                                    </div>
+                                )}
                             </div>
                         </section>
                     )}
 
                     <section className="bg-white/70 backdrop-blur-md p-6 rounded-2xl shadow-xl shadow-slate-200/40 border border-white/50">
                         <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-6 flex items-center gap-2">
-                            <div className="w-1.5 h-1.5 rounded-full bg-slate-500"></div> Cabeçalho do Documento
+                            <div className="w-1.5 h-1.5 rounded-full bg-slate-500"></div> Configuração do Cabeçalho
                         </h2>
-                        <div className="grid grid-cols-1 gap-4">
-                            <input type="text" placeholder="Nome do Órgão" value={config.orgao} onChange={e => setConfig({ ...config, orgao: e.target.value })}
-                                className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-slate-200 outline-none bg-slate-50/50 focus:bg-white transition-all" />
-                            <input type="text" placeholder="Setor" value={config.setor} onChange={e => setConfig({ ...config, setor: e.target.value })}
-                                className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-slate-200 outline-none bg-slate-50/50 focus:bg-white transition-all" />
-                            <div className="grid grid-cols-2 gap-3">
-                                <input type="text" placeholder="Cidade" value={config.cidade} onChange={e => setConfig({ ...config, cidade: e.target.value })}
-                                    className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-slate-200 outline-none bg-slate-50/50 focus:bg-white transition-all" />
-                                <input type="text" placeholder="UF" value={config.estado} onChange={e => setConfig({ ...config, estado: e.target.value })}
-                                    className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-slate-200 outline-none bg-slate-50/50 focus:bg-white transition-all" />
+                        <div className="space-y-4">
+                            <div className="space-y-1.5">
+                                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1">Instituição / Órgão</label>
+                                <input type="text" placeholder="Ex: PREFEITURA MUNICIPAL..." value={config.orgao} onChange={e => setConfig({ ...config, orgao: e.target.value })}
+                                    className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none bg-white transition-all shadow-sm" />
+                            </div>
+                            <div className="space-y-1.5">
+                                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1">Setor / Departamento</label>
+                                <input type="text" placeholder="Ex: Gabinete do Prefeito" value={config.setor} onChange={e => setConfig({ ...config, setor: e.target.value })}
+                                    className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none bg-white transition-all shadow-sm" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-4 pt-2">
+                                <div className="space-y-1.5">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1">Cidade</label>
+                                    <input type="text" placeholder="Cidade" value={config.cidade} onChange={e => setConfig({ ...config, cidade: e.target.value })}
+                                        className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none bg-white transition-all shadow-sm" />
+                                </div>
+                                <div className="space-y-1.5">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1">UF</label>
+                                    <input type="text" placeholder="UF" value={config.estado} onChange={e => setConfig({ ...config, estado: e.target.value })}
+                                        className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none bg-white transition-all shadow-sm" />
+                                </div>
                             </div>
                         </div>
                     </section>
@@ -423,29 +525,49 @@ const App = () => {
                     <div className="bg-slate-200/40 border border-slate-200/50 rounded-3xl p-8 flex-1 flex flex-col items-center justify-start overflow-auto relative shadow-inner print:bg-white print:p-0 print:border-none print:shadow-none print:rounded-none">
 
                         {!data.length && (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 opacity-60 pointer-events-none">
-                                <div className="bg-slate-100 p-6 rounded-full mb-4">
-                                    <FileText size={48} className="text-slate-300" />
+                            <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 opacity-60 pointer-events-none select-none">
+                                <div className="bg-slate-100 p-8 rounded-3xl mb-6 shadow-sm border border-slate-200/50">
+                                    <FileText size={64} className="text-slate-300 stroke-1" />
                                 </div>
-                                <p className="font-medium text-lg">Aguardando dados...</p>
-                                <p className="text-sm">Importe uma planilha para gerar a visualização</p>
+                                <p className="font-semibold text-xl text-slate-500">Aguardando dados</p>
+                                <p className="text-sm mt-1 max-w-[250px] text-center">Importe uma planilha ou arquivo CSV para gerar a visualização do documento.</p>
                             </div>
                         )}
 
                         <div className={`
-                            relative transition-all duration-500 ease-out transform origin-top
+                            relative transition-all duration-500 ease-out transform origin-top flex flex-col items-center
                             ${data.length > 0 ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-10 scale-95'}
                         `}>
                             {data.length > 0 && (
-                                <div className="absolute -top-12 left-0 right-0 flex justify-center items-center gap-2 text-slate-500 mb-4 print:hidden">
-                                    <span className="text-[10px] font-bold uppercase tracking-widest bg-white/80 py-1 px-3 rounded-full shadow-sm border border-slate-100">Visualização de Impressão (A4)</span>
+                                <div className="sticky top-0 z-30 mb-8 mt-2 print:hidden backdrop-blur-xl bg-slate-900/80 text-white px-2 py-1.5 rounded-full flex items-center gap-4 shadow-xl shadow-slate-900/20 border border-white/10 transition-all hover:bg-slate-900">
+                                    <button
+                                        onClick={() => setZoom(z => Math.max(0.3, z - 0.1))}
+                                        className="p-1.5 hover:bg-white/10 rounded-full transition-colors"
+                                    >
+                                        <ZoomOut size={16} />
+                                    </button>
+                                    <span className="text-xs font-medium w-12 text-center tabular-nums">
+                                        {Math.round(zoom * 100)}%
+                                    </span>
+                                    <button
+                                        onClick={() => setZoom(z => Math.min(2, z + 0.1))}
+                                        className="p-1.5 hover:bg-white/10 rounded-full transition-colors"
+                                    >
+                                        <ZoomIn size={16} />
+                                    </button>
+                                    <div className="w-[1px] h-4 bg-white/20"></div>
+                                    <span className="text-[10px] font-bold uppercase tracking-widest px-2 opacity-60">Visualização A4</span>
                                 </div>
                             )}
 
                             <div
                                 ref={printRef}
-                                className="bg-white w-[210mm] min-h-[297mm] p-[20mm] shadow-2xl shadow-slate-900/10 text-[#222] print:shadow-none print:w-full print:p-[15mm] print:mx-0 relative z-10"
-                                style={{ fontFamily: '"Times New Roman", Times, serif' }}
+                                className="bg-white w-[210mm] min-h-[297mm] p-[10mm] shadow-2xl shadow-slate-900/10 text-[#222] print:shadow-none print:w-full print:p-[5mm] print:mx-0 relative z-10 transition-transform duration-200 ease-out print:!transform-none print:!m-0 print:!h-auto print:!overflow-visible"
+                                style={{
+                                    fontFamily: '"Times New Roman", Times, serif',
+                                    transform: `scale(${zoom})`,
+                                    transformOrigin: 'top center'
+                                }}
                             >
                                 <div className="text-center mb-10 uppercase font-bold border-b-2 border-black pb-4">
                                     <div className="text-lg tracking-wide">{config.orgao}</div>
@@ -468,24 +590,26 @@ const App = () => {
                                         {Object.entries(groupedData).map(([groupName, groupItems], idx) => (
                                             <div key={idx} className="mb-8 break-inside-avoid mt-8">
                                                 <h4 className="font-bold text-xs mb-3 uppercase border-l-4 border-black pl-2 tracking-wide">ANEXO - {groupName}</h4>
-                                                <table className="w-full border-collapse border border-black text-[9px]">
-                                                    <thead>
-                                                        <tr className="bg-gray-100">
-                                                            {selectedColumns.map(header => (
-                                                                <th key={header} className="border border-black p-1.5 uppercase font-bold">{header}</th>
-                                                            ))}
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {groupItems.map((row, rIdx) => (
-                                                            <tr key={rIdx} className="text-center">
-                                                                {selectedColumns.map((key, cIdx) => (
-                                                                    <td key={cIdx} className="border border-black p-1.5">{row[key]}</td>
+                                                <div className="w-full overflow-x-auto border border-slate-100 rounded mb-2 print:border-none print:overflow-visible">
+                                                    <table className="w-full border-collapse border border-black text-[9px] min-w-max print:min-w-full print:table-fixed">
+                                                        <thead>
+                                                            <tr className="bg-gray-100 print:bg-gray-100">
+                                                                {selectedColumns.map((header, idx) => (
+                                                                    <th key={`${header}-${idx}`} className="border border-black p-1.5 uppercase font-bold whitespace-nowrap print:whitespace-normal">{header}</th>
                                                                 ))}
                                                             </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
+                                                        </thead>
+                                                        <tbody>
+                                                            {groupItems.map((row, rIdx) => (
+                                                                <tr key={rIdx} className="text-center hover:bg-slate-50 print:hover:bg-transparent">
+                                                                    {selectedColumns.map((key, cIdx) => (
+                                                                        <td key={`${key}-${cIdx}`} className="border border-black p-1.5 whitespace-nowrap print:whitespace-normal">{row[key]}</td>
+                                                                    ))}
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
                                             </div>
                                         ))}
 
